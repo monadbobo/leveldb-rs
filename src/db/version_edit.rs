@@ -245,7 +245,7 @@ impl VersionEdit {
 
     fn get_internal_key(src: &[u8]) -> Option<(usize, InternalKey)> {
         let (bytes_read, key) = get_length_prefixed_slice(src)?;
-        let key = InternalKey::decode_from(key);
+        let key = InternalKey::decode_from(key)?;
         Some((bytes_read, key))
     }
 
