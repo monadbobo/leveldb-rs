@@ -1,6 +1,6 @@
 use crate::db::error::DbError;
 
-pub trait Iterator {
+pub trait DBIterator {
     fn valid(&self) -> bool;
     fn seek_to_first(&mut self);
     fn seek_to_last(&mut self);

@@ -1,8 +1,8 @@
-mod version_edit;
-mod dbformat;
-mod wal;
-mod error;
 mod config;
-mod version_set;
-mod iterator;
+mod dbformat;
+pub(crate) mod error;
+pub mod iterator;
 mod options;
+mod version_edit;
+mod version_set;
+mod wal;

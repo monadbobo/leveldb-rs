@@ -1,5 +1,5 @@
-pub struct BlockContent<'a> {
-    data: &'a [u8],
+pub struct BlockContent {
+    pub(crate) data: Vec<u8>,
     cachable: bool,
-    heap_allocated: bool,
+    pub(crate) heap_allocated: bool,
 }
