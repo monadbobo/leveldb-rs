@@ -210,7 +210,7 @@ impl DBIterator for BlockIter<'_> {
                 return;
             }
 
-            let (key, shared, non_shared, value_length) = entry.unwrap();
+            let (key, shared, non_shared, _) = entry.unwrap();
             let mid_key = &key[..non_shared as usize];
 
             if self.compare(mid_key, target) == std::cmp::Ordering::Less {
