@@ -1,3 +1,5 @@
 pub mod coding;
 pub mod comparator;
+pub mod filter_policy;
+pub mod hash;
 pub mod options;
