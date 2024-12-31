@@ -1,4 +1,4 @@
-use crate::util::coding::{decode_fixed32, decode_fixed64, put_fixed32};
+use crate::util::coding::{decode_fixed32, put_fixed32};
 use crate::util::filter_policy::FilterPolicy;
 use std::sync::Arc;
 use zstd::zstd_safe::WriteBuf;
@@ -7,7 +7,7 @@ const FILTER_BASE_LG: usize = 11;
 const FILTER_BASE: usize = 1 << FILTER_BASE_LG;
 
 pub struct FilterBlockBuilder {
-    policy: Arc<dyn FilterPolicy>,
+    policy: Arc<Box<dyn FilterPolicy>>,
     keys: Vec<u8>,
     start: Vec<usize>,
     result: Vec<u8>,
@@ -15,7 +15,7 @@ pub struct FilterBlockBuilder {
 }
 
 impl FilterBlockBuilder {
-    pub fn new(policy: Arc<dyn FilterPolicy>) -> Self {
+    pub fn new(policy: Arc<Box<dyn FilterPolicy>>) -> Self {
         FilterBlockBuilder {
             policy,
             keys: Vec::new(),
@@ -77,7 +77,7 @@ impl FilterBlockBuilder {
     }
 }
 pub struct FilterBlockReader<'a> {
-    policy: Arc<dyn FilterPolicy>,
+    policy: Arc<Box<dyn FilterPolicy>>,
     data: Option<&'a [u8]>,
     offset: usize,
     num: usize,
@@ -85,7 +85,7 @@ pub struct FilterBlockReader<'a> {
 }
 
 impl<'a> FilterBlockReader<'a> {
-    pub fn new(policy: Arc<dyn FilterPolicy>, data: &'a [u8]) -> Self {
+    pub fn new(policy: Arc<Box<dyn FilterPolicy>>, data: &'a [u8]) -> Self {
         let mut fb = FilterBlockReader {
             policy,
             data: None,
@@ -129,12 +129,13 @@ impl<'a> FilterBlockReader<'a> {
 mod test {
     use crate::util;
     use crate::util::coding::{decode_fixed32, encode_fixed32};
+    use crate::util::filter_policy::FilterPolicy;
     use std::arch::aarch64::vbic_s8;
     use std::sync::Arc;
 
     struct TestHashFilterPolicy;
 
-    impl util::filter_policy::FilterPolicy for TestHashFilterPolicy {
+    impl FilterPolicy for TestHashFilterPolicy {
         fn name(&self) -> &str {
             "TestHashFilterPolicy"
         }
@@ -161,7 +162,7 @@ mod test {
 
     #[test]
     fn test_empty_filter_block() {
-        let policy = Arc::new(TestHashFilterPolicy);
+        let policy: Arc<Box<dyn FilterPolicy>> = Arc::new(Box::new(TestHashFilterPolicy));
         let mut builder = super::FilterBlockBuilder::new(policy.clone());
         let block = builder.finish();
         assert_eq!(block.len(), 5);
@@ -173,7 +174,7 @@ mod test {
 
     #[test]
     fn test_single_chunk() {
-        let policy = Arc::new(TestHashFilterPolicy);
+        let policy: Arc<Box<dyn FilterPolicy>> = Arc::new(Box::new(TestHashFilterPolicy));
         let mut builder = super::FilterBlockBuilder::new(policy.clone());
         builder.start_block(100);
         builder.add_key(b"foo");
@@ -196,7 +197,7 @@ mod test {
 
     #[test]
     fn test_multi_chunk() {
-        let policy = Arc::new(TestHashFilterPolicy);
+        let policy: Arc<Box<dyn FilterPolicy>> = Arc::new(Box::new(TestHashFilterPolicy));
         let mut builder = super::FilterBlockBuilder::new(policy.clone());
         builder.start_block(0);
         builder.add_key(b"foo");

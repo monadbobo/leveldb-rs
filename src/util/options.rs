@@ -1,7 +1,17 @@
-#[derive(Debug, Clone)]
+use crate::util::comparator::{BytewiseComparatorImpl, Comparator};
+use crate::util::filter_policy::FilterPolicy;
+use crate::util::options::CompressionType::SnappyCompression;
+use std::sync::Arc;
+
+#[derive(Clone)]
 pub struct Options {
-    pub(crate) max_file_size: isize,
-    pub(crate) block_restart_interval: isize,
+    pub max_file_size: isize,
+    pub block_restart_interval: isize,
+    pub filter_policy: Option<Arc<Box<dyn FilterPolicy>>>,
+    pub comparator: Arc<Box<dyn Comparator>>,
+    pub block_size: isize,
+    pub compression: CompressionType,
+    pub zstd_compression_level: i32,
 }
 
 impl Default for Options {
@@ -9,6 +19,11 @@ impl Default for Options {
         Options {
             max_file_size: 4 * 1024 * 1024,
             block_restart_interval: 16,
+            filter_policy: None,
+            comparator: Arc::new(Box::new(BytewiseComparatorImpl)),
+            block_size: 4 * 1024,
+            compression: SnappyCompression,
+            zstd_compression_level: 1,
         }
     }
 }

@@ -1,10 +1,11 @@
 use crate::util::coding::{put_fixed32, put_varint32};
 use crate::util::options::Options;
+use bytes::{BufMut, Bytes, BytesMut};
+use zstd::zstd_safe::WriteBuf;
 
-#[derive(Debug)]
 pub struct BlockBuilder {
     options: Options,
-    buffer: Vec<u8>,
+    buffer: BytesMut,
     restarts: Vec<u32>,
     counter: u32,
     finish: bool,
@@ -15,7 +16,7 @@ impl BlockBuilder {
     pub fn new(options: Options) -> Self {
         BlockBuilder {
             options,
-            buffer: Vec::new(),
+            buffer: BytesMut::new(),
             restarts: vec![0],
             counter: 0,
             finish: false,
@@ -36,14 +37,14 @@ impl BlockBuilder {
         self.buffer.len() + self.restarts.len() * 4 + 4
     }
 
-    pub fn finish(&mut self) -> &[u8] {
+    pub fn finish(&mut self) -> Bytes {
         for r in &self.restarts {
-            self.buffer.append(&mut put_fixed32(*r));
+            self.buffer.put_slice(put_fixed32(*r).as_slice());
         }
         self.buffer
-            .append(&mut put_fixed32(self.restarts.len() as u32));
+            .put_slice(put_fixed32(self.restarts.len() as u32).as_slice());
         self.finish = true;
-        &self.buffer
+        self.buffer.split().freeze()
     }
 
     pub fn add(&mut self, key: &[u8], value: &[u8]) {
@@ -61,16 +62,23 @@ impl BlockBuilder {
 
         let non_shared = key.len() - shared;
         // Add "<shared><non_shared><value_size>" to buffer_
-        self.buffer.append(&mut put_varint32(shared as u32));
-        self.buffer.append(&mut put_varint32(non_shared as u32));
-        self.buffer.append(&mut put_varint32(value.len() as u32));
+        self.buffer
+            .put_slice(put_varint32(shared as u32).as_slice());
+        self.buffer
+            .put_slice(put_varint32(non_shared as u32).as_slice());
+        self.buffer
+            .put_slice(put_varint32(value.len() as u32).as_slice());
         // Add string delta to buffer_ followed by value
-        self.buffer.extend_from_slice(&key[shared..]);
-        self.buffer.extend_from_slice(value);
+        self.buffer.put_slice(&key[shared..]);
+        self.buffer.put_slice(value);
 
         //update state
         self.last_key.resize(shared, 0);
         self.last_key.append(&mut key[shared..].to_vec());
         self.counter += 1;
+    }
+
+    pub fn empty(&self) -> bool {
+        self.buffer.is_empty()
     }
 }

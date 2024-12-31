@@ -24,6 +24,10 @@ pub struct BlockHandle {
 const kMaxEncodedLength: usize = 10 + 10;
 
 impl BlockHandle {
+    pub fn new() -> Self {
+        BlockHandle { offset: 0, size: 0 }
+    }
+
     pub fn encode_to(&self) -> Vec<u8> {
         let mut result = put_varint64(self.offset);
         result.append(&mut put_varint64(self.size));
@@ -80,6 +84,13 @@ pub struct Footer {
 }
 
 impl Footer {
+    pub fn new() -> Self {
+        Footer {
+            metaindex_handle: BlockHandle::new(),
+            index_handle: BlockHandle::new(),
+        }
+    }
+
     pub fn metaindex_handle(&self) -> &BlockHandle {
         &self.metaindex_handle
     }
