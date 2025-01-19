@@ -1,3 +1,4 @@
+pub mod cache;
 pub mod coding;
 pub mod comparator;
 pub mod filter_policy;

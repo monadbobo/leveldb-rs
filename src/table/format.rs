@@ -69,12 +69,12 @@ impl BlockHandle {
 // Footer will always occupy exactly this many bytes.  It consists
 // of two block handles and a magic number.
 
-const kEncodedLength: usize = 2 * kMaxEncodedLength + 8;
+pub(crate) const kEncodedLength: usize = 2 * kMaxEncodedLength + 8;
 
-const kTableMagicNumber: u64 = 0xdb4775248b80fb57;
+pub(crate) const kTableMagicNumber: u64 = 0xdb4775248b80fb57;
 
 // 1-byte type + 32-bit crc
-const kBlockTrailerSize: usize = 5;
+pub(crate) const kBlockTrailerSize: usize = 5;
 
 // Footer encapsulates the fixed information stored at the tail
 // end of every table file.

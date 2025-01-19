@@ -1,6 +1,9 @@
 use crate::db::iterator::DBIterator;
 use crate::table::format::BlockContent;
 use crate::util::coding::{decode_fixed32, get_varint32};
+use crate::util::comparator::Comparator;
+use std::pin::Pin;
+use std::sync::Arc;
 
 pub struct Block {
     data: Vec<u8>,
@@ -66,10 +69,48 @@ impl Block {
         self.size
     }
 
-    pub fn new_iterator(
-        &self,
-        comparator: Box<dyn crate::util::comparator::Comparator>,
-    ) -> Box<dyn DBIterator + '_> {
+    pub fn new_iterator_into(
+        mut self,
+        comparator: Arc<Box<dyn Comparator>>,
+    ) -> Box<dyn DBIterator> {
+        if self.size < 4 {
+            todo!("error iterator");
+        }
+
+        let num_restarts = self.num_restarts();
+        if num_restarts == 0 {
+            todo!("empty iterator");
+        } else {
+            let owned_value = Box::new(self.data);
+
+            let data: &[u8] = unsafe {
+                // Convert the reference of owned_value to 'static,
+                // which is safe because we ensure that the lifetime of owned_value outlives BlockIter
+                //    let data: &'static [u8] = std::mem::transmute(&owned_value[..]);
+                //data
+                std::mem::transmute(&owned_value[..])
+            };
+
+            let iter = BlockIter {
+                comparator,
+                data,
+                restarts: 0,
+                num_restarts: 0,
+                current: 0,
+                restart_index: 0,
+                next_entry_offset: 0,
+                key: Vec::new(),
+                value: &[],
+                status: Ok(()),
+            };
+            Box::new(BlockIterInto {
+                inner: Box::new(iter),
+                owned_value,
+            })
+        }
+    }
+
+    pub fn new_iterator(&self, comparator: Arc<Box<dyn Comparator>>) -> Box<dyn DBIterator + '_> {
         if self.size < 4 {
             todo!("error iterator");
         }
@@ -94,8 +135,77 @@ impl Block {
     }
 }
 
+struct BlockIterInto<'a> {
+    inner: Box<BlockIter<'a>>,
+    owned_value: Box<Vec<u8>>,
+}
+
+impl BlockIterInto<'_> {
+    pub fn compare(&self, a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+        self.inner.compare(a, b)
+    }
+
+    pub fn next_entry_offset(&self) -> u32 {
+        self.inner.next_entry_offset()
+    }
+
+    pub fn get_restart_point(&self, index: u32) -> u32 {
+        self.inner.get_restart_point(index)
+    }
+
+    pub fn seek_to_restart_point(&mut self, index: u32) {
+        self.inner.seek_to_restart_point(index);
+    }
+
+    fn corruption_error(&mut self) {
+        self.inner.corruption_error();
+    }
+
+    fn parse_next_key(&mut self) -> bool {
+        self.inner.parse_next_key()
+    }
+}
+
+impl DBIterator for BlockIterInto<'_> {
+    fn valid(&self) -> bool {
+        self.inner.valid()
+    }
+
+    fn seek_to_first(&mut self) {
+        self.inner.seek_to_first();
+    }
+
+    fn seek_to_last(&mut self) {
+        self.inner.seek_to_last();
+    }
+
+    fn seek(&mut self, target: &[u8]) {
+        self.inner.seek(target);
+    }
+
+    fn next(&mut self) {
+        self.inner.next();
+    }
+
+    fn prev(&mut self) {
+        self.inner.prev();
+    }
+
+    fn key(&self) -> &[u8] {
+        self.inner.key()
+    }
+
+    fn value(&self) -> &[u8] {
+        self.inner.value()
+    }
+
+    fn status(&self) -> Result<(), crate::db::error::DbError> {
+        self.inner.status()
+    }
+}
+
 struct BlockIter<'a> {
-    comparator: Box<dyn crate::util::comparator::Comparator>,
+    comparator: Arc<Box<dyn Comparator>>,
     data: &'a [u8],
     restarts: u32,
     num_restarts: u32,
@@ -127,6 +237,8 @@ impl BlockIter<'_> {
         self.restart_index = index;
 
         let offset = self.get_restart_point(index);
+        //let slice = self.data.as_ref();
+        //self.value = &slice[offset as usize..];
         self.value = &self.data[offset as usize..];
         self.next_entry_offset = offset;
     }

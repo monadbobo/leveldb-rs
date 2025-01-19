@@ -1,3 +1,4 @@
+use crate::util::cache::Cache;
 use crate::util::comparator::{BytewiseComparatorImpl, Comparator};
 use crate::util::filter_policy::FilterPolicy;
 use crate::util::options::CompressionType::SnappyCompression;
@@ -12,6 +13,8 @@ pub struct Options {
     pub block_size: isize,
     pub compression: CompressionType,
     pub zstd_compression_level: i32,
+    pub paranoid_checks: bool,
+    pub block_cache: Option<Cache>,
 }
 
 impl Default for Options {
@@ -24,6 +27,8 @@ impl Default for Options {
             block_size: 4 * 1024,
             compression: SnappyCompression,
             zstd_compression_level: 1,
+            paranoid_checks: false,
+            block_cache: None,
         }
     }
 }

@@ -5,13 +5,40 @@ use crate::table::format::{BlockHandle, Footer};
 use crate::util::options::CompressionType::NoCompression;
 use crate::util::options::{CompressionType, Options};
 use bytes::{Bytes, BytesMut};
+use crc32fast::Hasher;
 use std::cmp::Ordering;
 use std::fs::File;
-use std::hash::Hasher;
 use std::io::{Read, Write};
 use zstd::zstd_safe::WriteBuf;
 
 const K_BLOCK_TRAILER_SIZE: usize = 7;
+const MASK_DELTA: u32 = 0xa282ead8;
+
+/// Mask the CRC value to prevent issues with CRCs embedded in the data
+fn mask(crc: u32) -> u32 {
+    ((crc >> 15) | (crc << 17)).wrapping_add(MASK_DELTA)
+}
+
+/// Convert block contents and type into trailer bytes
+fn create_block_trailer(block_contents: &[u8], block_type: u8) -> [u8; 5] {
+    let mut trailer = [0u8; 5];
+    trailer[0] = block_type;
+
+    // Calculate initial CRC of block contents
+    let mut hasher = Hasher::new();
+    hasher.update(block_contents);
+
+    // Extend CRC to cover block type
+    hasher.update(&[block_type]);
+
+    let crc = hasher.finalize();
+    let masked_crc = mask(crc);
+
+    // Encode masked CRC in little-endian
+    trailer[1..].copy_from_slice(&masked_crc.to_le_bytes());
+
+    trailer
+}
 
 pub struct TableBuilder {
     options: Options,
@@ -202,7 +229,11 @@ impl TableBuilder {
             .write_all(block_contents)
             .map_err(DbError::IOError);
         if self.status.is_ok() {
-            todo!("write crc");
+            let trailer = create_block_trailer(block_contents, ct as u8);
+            self.status = self.file.write_all(&trailer).map_err(DbError::IOError);
+            if self.status.is_ok() {
+                self.offset += block_contents.len() as u64 + K_BLOCK_TRAILER_SIZE as u64;
+            }
         }
         handle
     }
@@ -215,7 +246,8 @@ impl TableBuilder {
         let mut filter_block_handle = BlockHandle::new();
         if self.status.is_ok() {
             if let Some(filter) = &mut self.filter_block.take() {
-                self.write_raw_block(filter.finish(), CompressionType::NoCompression);
+                filter_block_handle =
+                    self.write_raw_block(filter.finish(), CompressionType::NoCompression);
             }
         }
 
