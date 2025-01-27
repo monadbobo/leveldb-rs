@@ -14,6 +14,16 @@ pub struct BlockContent {
     pub(crate) heap_allocated: bool,
 }
 
+impl BlockContent {
+    pub fn new(data: Vec<u8>, cachable: bool, heap_allocated: bool) -> Self {
+        BlockContent {
+            data,
+            cachable,
+            heap_allocated,
+        }
+    }
+}
+
 // BlockHandle is a pointer to the extent of a file that stores a data
 // block or a meta block.
 pub struct BlockHandle {

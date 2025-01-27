@@ -1,10 +1,10 @@
-use crate::db::iterator::DBIterator;
+use crate::db::iterator::{DBIterator, EmptyDBIterator};
 use crate::table::format::BlockContent;
 use crate::util::coding::{decode_fixed32, get_varint32};
 use crate::util::comparator::Comparator;
-use std::pin::Pin;
 use std::sync::Arc;
 
+#[derive(Debug)]
 pub struct Block {
     data: Vec<u8>,
     size: isize,
@@ -19,8 +19,17 @@ fn decode_entry(data: &[u8]) -> Option<(&[u8], u32, u32, u32)> {
     let mut shared = data[0] as u32;
     let mut non_shared = data[1] as u32;
     let mut value_length = data[2] as u32;
-    let mut size = 3;
+    println!(
+        "decode_entry: shared: {}, non_shared: {}, value_length: {}",
+        shared, non_shared, value_length
+    );
+    let mut size = 0;
     if (shared | non_shared | value_length) < 128 {
+        println!(
+            "shared: {}, non_shared: {}, value_length: {}",
+            shared, non_shared, value_length
+        );
+        size += 3;
     } else {
         let (s, sd) = get_varint32(&data[size..])?;
         shared = sd;
@@ -41,7 +50,7 @@ fn decode_entry(data: &[u8]) -> Option<(&[u8], u32, u32, u32)> {
 
 impl Block {
     fn num_restarts(&self) -> u32 {
-        decode_fixed32(&self.data[self.data.len() - 4..])
+        decode_fixed32(&self.data[self.size as usize - 4..])
     }
 
     pub fn new(block_content: BlockContent) -> Block {
@@ -60,6 +69,9 @@ impl Block {
                 b.size = 0;
             } else {
                 b.restart_offset = b.size as u32 - (b.num_restarts() + 1) * 4;
+                println!("restart_offset: {}", b.restart_offset);
+                println!("num_restarts: {}", b.num_restarts());
+                println!("size: {}", b.size);
             }
         }
         b
@@ -79,7 +91,7 @@ impl Block {
 
         let num_restarts = self.num_restarts();
         if num_restarts == 0 {
-            todo!("empty iterator");
+            Box::new(EmptyDBIterator::new())
         } else {
             let owned_value = Box::new(self.data);
 
@@ -115,17 +127,22 @@ impl Block {
             todo!("error iterator");
         }
 
+        println!(
+            "num_restarts: {}, restarts: {}",
+            self.num_restarts(),
+            self.restart_offset
+        );
         let num_restarts = self.num_restarts();
         if num_restarts == 0 {
-            todo!("empty iterator");
+            Box::new(EmptyDBIterator::new())
         } else {
             Box::new(BlockIter {
                 comparator,
                 data: &self.data,
                 restarts: self.restart_offset,
                 num_restarts,
-                current: 0,
-                restart_index: 0,
+                current: self.restart_offset,
+                restart_index: num_restarts,
                 next_entry_offset: 0,
                 key: Vec::new(),
                 value: &[],
@@ -229,7 +246,8 @@ impl BlockIter<'_> {
     }
 
     pub fn get_restart_point(&self, index: u32) -> u32 {
-        decode_fixed32(&self.data[..(self.restarts + index * 4) as usize])
+        assert!(index < self.num_restarts);
+        decode_fixed32(&self.data[(self.restarts + index * 4) as usize..])
     }
 
     pub fn seek_to_restart_point(&mut self, index: u32) {
@@ -255,22 +273,36 @@ impl BlockIter<'_> {
 
     fn parse_next_key(&mut self) -> bool {
         self.current = self.next_entry_offset();
+        println!("parse_next_key: current: {}", self.current);
         if self.current >= self.restarts {
             self.current = self.restarts;
             self.restart_index = self.num_restarts;
+            println!("current: {}, restarts: {}", self.current, self.restarts);
             return false;
         }
         // Decode next entry
         let entry = decode_entry(&self.data[self.current as usize..]);
         if entry.is_none() || self.key.len() < entry.unwrap().1 as usize {
+            println!("key len: {}", self.key.len());
+            println!("entry: {:?}", entry);
             self.corruption_error();
             false
         } else {
             let (key, shared, non_shared, value_length) = entry.unwrap();
+            println!(
+                "{:?}, {:?}, {:?}, {:?}, {:?}",
+                key,
+                shared,
+                non_shared,
+                value_length,
+                (self.data.len() - key.len()) as u32 - self.current
+            );
             self.key.resize(shared as usize, 0);
             self.key.extend_from_slice(&key[..non_shared as usize]);
-            self.value = &key[non_shared as usize..value_length as usize];
-            self.next_entry_offset += non_shared + value_length;
+            self.value = &key[non_shared as usize..(non_shared + value_length) as usize];
+            self.next_entry_offset +=
+                non_shared + value_length + (self.data.len() - key.len()) as u32 - self.current;
+            println!("next_entry_offset: {}", self.next_entry_offset);
 
             while self.restart_index + 1 < self.num_restarts
                 && self.get_restart_point(self.restart_index + 1) < self.current
@@ -284,6 +316,7 @@ impl BlockIter<'_> {
 
 impl DBIterator for BlockIter<'_> {
     fn valid(&self) -> bool {
+        println!("current: {}, restarts: {}", self.current, self.restarts);
         self.current < self.restarts
     }
 
@@ -349,10 +382,12 @@ impl DBIterator for BlockIter<'_> {
     }
 
     fn next(&mut self) {
+        assert!(self.valid());
         self.parse_next_key();
     }
 
     fn prev(&mut self) {
+        assert!(self.valid());
         let origin = self.current;
         while self.get_restart_point(self.restart_index) >= origin {
             if self.restart_index == 0 {

@@ -38,9 +38,12 @@ impl BlockBuilder {
     }
 
     pub fn finish(&mut self) -> Bytes {
+        println!("finish restarts offset: {:?}", self.buffer.len());
         for r in &self.restarts {
+            println!("finish restarts: {:?}", r);
             self.buffer.put_slice(put_fixed32(*r).as_slice());
         }
+        println!("finish restarts: {:?}", self.restarts.len());
         self.buffer
             .put_slice(put_fixed32(self.restarts.len() as u32).as_slice());
         self.finish = true;
@@ -50,6 +53,7 @@ impl BlockBuilder {
     pub fn add(&mut self, key: &[u8], value: &[u8]) {
         assert!(!self.finish);
         let mut shared = 0;
+        println!("counter: {}", self.counter);
         if self.counter < self.options.block_restart_interval as u32 {
             let min_length = std::cmp::min(key.len(), self.last_key.len());
             while (shared < min_length) && (key[shared] == self.last_key[shared]) {
@@ -58,9 +62,11 @@ impl BlockBuilder {
         } else {
             self.restarts.push(self.buffer.len() as u32);
             self.counter = 0;
+            println!("add restarts: {:?}", self.restarts.len());
         }
 
         let non_shared = key.len() - shared;
+        println!("shared: {}, non_shared: {}", shared, non_shared);
         // Add "<shared><non_shared><value_size>" to buffer_
         self.buffer
             .put_slice(put_varint32(shared as u32).as_slice());

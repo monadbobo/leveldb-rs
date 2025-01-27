@@ -1,6 +1,7 @@
+use std::any::Any;
 use std::cmp::Ordering;
 
-pub trait Comparator {
+pub trait Comparator: Any {
     fn name(&self) -> &str;
     fn compare(&self, a: &[u8], b: &[u8]) -> Ordering;
     fn find_shortest_separator(&self, start: &[u8], limit: &[u8]) -> Option<Vec<u8>>;

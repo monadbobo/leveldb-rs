@@ -199,3 +199,516 @@ impl BlockFunction for Table<'_> {
         Ok(block.new_iterator_into(Arc::new(Box::new(BytewiseComparatorImpl))))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::db::error::DbError;
+    use crate::db::iterator::DBIterator;
+    use crate::table::block::Block;
+    use crate::table::block_builder::BlockBuilder;
+    use crate::table::format::BlockContent;
+    use crate::util::comparator::{BytewiseComparatorImpl, Comparator};
+    use crate::util::options::Options;
+    use crate::util::testutil::{random_key, random_string, skewed};
+    use bytes::{BufMut, Bytes};
+    use rand::rngs::StdRng;
+    use rand::{thread_rng, SeedableRng};
+    use std::any::Any;
+    use std::cmp::Ordering;
+    use std::sync::Arc;
+    use zstd::zstd_safe::WriteBuf;
+
+    struct ReverseKeyComparator;
+
+    impl Comparator for ReverseKeyComparator {
+        fn name(&self) -> &str {
+            "leveldb.ReverseBytewiseCOmparator"
+        }
+
+        fn compare(&self, a: &[u8], b: &[u8]) -> Ordering {
+            let mut a = a.to_vec();
+            a.reverse();
+            let mut b = b.to_vec();
+            b.reverse();
+            BytewiseComparatorImpl.compare(a.as_slice(), b.as_slice())
+        }
+
+        fn find_shortest_separator(&self, start: &[u8], limit: &[u8]) -> Option<Vec<u8>> {
+            let mut s = start.to_vec();
+            s.reverse();
+            let mut l = limit.to_vec();
+            l.reverse();
+            BytewiseComparatorImpl
+                .find_shortest_separator(s.as_slice(), l.as_slice())
+                .map(|v| {
+                    let mut v = v.clone();
+                    v.reverse();
+                    v
+                })
+        }
+
+        fn find_short_successor(&self, key: &[u8]) -> Option<Vec<u8>> {
+            let mut s = key.to_vec();
+            s.reverse();
+            BytewiseComparatorImpl
+                .find_short_successor(s.as_slice())
+                .map(|v| {
+                    let mut v = v.clone();
+                    v.reverse();
+                    v
+                })
+        }
+    }
+
+    fn increment(cmp: Box<dyn Comparator>, key: &[u8]) -> Vec<u8> {
+        if cmp.type_id() == BytewiseComparatorImpl.type_id() {
+            let mut result = key.to_vec();
+            result.push(b'\0');
+            result
+        } else {
+            let mut rev = key.to_vec();
+            rev.reverse();
+            rev.put_u8(b'\0');
+            rev
+        }
+    }
+
+    #[derive(Clone)]
+    struct KeyWrapper {
+        key: Vec<u8>,
+        cmp: Arc<Box<dyn Comparator>>,
+    }
+
+    impl KeyWrapper {
+        pub fn new() -> Self {
+            KeyWrapper {
+                key: Vec::new(),
+                cmp: Arc::new(Box::new(BytewiseComparatorImpl)),
+            }
+        }
+    }
+
+    impl PartialEq for KeyWrapper {
+        fn eq(&self, other: &Self) -> bool {
+            self.cmp.compare(self.key.as_slice(), other.key.as_slice()) == Ordering::Equal
+        }
+    }
+
+    impl Eq for KeyWrapper {}
+
+    impl PartialOrd for KeyWrapper {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for KeyWrapper {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.cmp.compare(self.key.as_slice(), other.key.as_slice())
+        }
+    }
+
+    type KVMap = std::collections::BTreeMap<KeyWrapper, Vec<u8>>;
+
+    pub trait Constructor {
+        fn add(&mut self, key: KeyWrapper, value: &[u8]);
+        fn finish_impl(&mut self, options: &Options, data: &KVMap) -> Result<(), DbError>;
+        fn new_iterator(&self) -> Box<dyn DBIterator + '_>;
+        fn data(&self) -> &KVMap;
+        // fn db(&self) -> Option<&DB> {
+        //     None
+        // }
+
+        fn finish(
+            &mut self,
+            options: &Options,
+            keys: &mut Vec<KeyWrapper>,
+            kvmap: &mut KVMap,
+        ) -> Result<(), DbError> {
+            *kvmap = self.data().clone();
+            keys.clear();
+            keys.extend(self.data().keys().cloned());
+            self.finish_impl(options, kvmap)
+        }
+    }
+
+    pub struct BlockConstructor {
+        data: KVMap,
+        comparator: Arc<Box<dyn Comparator>>,
+        block: Option<Block>,
+        block_data: Bytes,
+    }
+
+    impl BlockConstructor {
+        pub fn new(cmp: Arc<Box<dyn Comparator>>) -> Self {
+            BlockConstructor {
+                data: KVMap::new(),
+                comparator: cmp,
+                block: None,
+                block_data: Bytes::new(),
+            }
+        }
+    }
+
+    impl Constructor for BlockConstructor {
+        fn add(&mut self, key: KeyWrapper, value: &[u8]) {
+            self.data.insert(key, value.to_vec());
+        }
+
+        fn finish_impl(&mut self, options: &Options, data: &KVMap) -> Result<(), DbError> {
+            self.data.clear();
+            self.block = None;
+            let mut builder = BlockBuilder::new(options.clone());
+
+            for (key, value) in data {
+                println!("{:?} value: {:?}", key.key.as_slice(), value);
+                builder.add(key.key.as_slice(), value);
+            }
+
+            self.block_data = builder.finish();
+            println!("Block data: {:?}", self.block_data.len());
+            let content = BlockContent::new(self.block_data.to_vec(), false, false);
+
+            self.block = Some(Block::new(content));
+            println!("Block: {:?}", self.block);
+            Ok(())
+        }
+
+        fn new_iterator(&self) -> Box<dyn DBIterator + '_> {
+            self.block
+                .as_ref()
+                .unwrap()
+                .new_iterator(self.comparator.clone())
+        }
+
+        fn data(&self) -> &KVMap {
+            &self.data
+        }
+    }
+
+    #[derive(Clone, Eq, PartialEq)]
+    enum TestType {
+        TABLE,
+        BLOCK,
+        MEMTABLE,
+        DB,
+    }
+
+    struct TestArgs {
+        r#type: TestType,
+        reverse_compare: bool,
+        restart_interval: usize,
+    }
+
+    const kNumTestArgs: usize = 16;
+    const kTestArgList: [TestArgs; kNumTestArgs] = [
+        TestArgs {
+            r#type: TestType::TABLE,
+            reverse_compare: false,
+            restart_interval: 16,
+        },
+        TestArgs {
+            r#type: TestType::TABLE,
+            reverse_compare: false,
+            restart_interval: 1,
+        },
+        TestArgs {
+            r#type: TestType::TABLE,
+            reverse_compare: false,
+            restart_interval: 1024,
+        },
+        TestArgs {
+            r#type: TestType::TABLE,
+            reverse_compare: true,
+            restart_interval: 16,
+        },
+        TestArgs {
+            r#type: TestType::TABLE,
+            reverse_compare: true,
+            restart_interval: 1,
+        },
+        TestArgs {
+            r#type: TestType::TABLE,
+            reverse_compare: true,
+            restart_interval: 1024,
+        },
+        TestArgs {
+            r#type: TestType::BLOCK,
+            reverse_compare: false,
+            restart_interval: 16,
+        },
+        TestArgs {
+            r#type: TestType::BLOCK,
+            reverse_compare: false,
+            restart_interval: 1,
+        },
+        TestArgs {
+            r#type: TestType::BLOCK,
+            reverse_compare: false,
+            restart_interval: 1024,
+        },
+        TestArgs {
+            r#type: TestType::BLOCK,
+            reverse_compare: true,
+            restart_interval: 16,
+        },
+        TestArgs {
+            r#type: TestType::BLOCK,
+            reverse_compare: true,
+            restart_interval: 1,
+        },
+        TestArgs {
+            r#type: TestType::BLOCK,
+            reverse_compare: true,
+            restart_interval: 1024,
+        },
+        TestArgs {
+            r#type: TestType::MEMTABLE,
+            reverse_compare: false,
+            restart_interval: 16,
+        },
+        TestArgs {
+            r#type: TestType::MEMTABLE,
+            reverse_compare: true,
+            restart_interval: 16,
+        },
+        TestArgs {
+            r#type: TestType::DB,
+            reverse_compare: false,
+            restart_interval: 16,
+        },
+        TestArgs {
+            r#type: TestType::DB,
+            reverse_compare: true,
+            restart_interval: 16,
+        },
+    ];
+
+    struct TestTemplate {
+        pub options: Options,
+        pub construct: Box<dyn Constructor>,
+    }
+
+    impl TestTemplate {
+        pub fn new(args: &TestArgs) -> Self {
+            let mut options = Options::default();
+
+            options.block_restart_interval = args.restart_interval as isize;
+            options.block_size = 256;
+
+            if args.reverse_compare {
+                options.comparator = Arc::new(Box::new(ReverseKeyComparator {}));
+            }
+
+            match args.r#type {
+                TestType::TABLE => {
+                    todo!("Table")
+                }
+                TestType::BLOCK => {
+                    let cmp = options.comparator.clone();
+                    TestTemplate {
+                        options,
+                        construct: Box::new(BlockConstructor::new(cmp)),
+                    }
+                }
+                TestType::MEMTABLE => {
+                    todo!("Memtable")
+                }
+                TestType::DB => {
+                    todo!("DB")
+                }
+            }
+        }
+
+        pub fn add(&mut self, key: KeyWrapper, value: &[u8]) {
+            self.construct.add(key, value);
+        }
+
+        pub fn test(&mut self) {
+            let mut keys = Vec::new();
+            let mut kvmap = KVMap::new();
+            self.construct
+                .finish(&self.options, &mut keys, &mut kvmap)
+                .unwrap();
+            self.test_forward_scan(&keys, &kvmap);
+            self.test_backward_scan(&keys, &kvmap);
+        }
+
+        pub fn test_forward_scan(&mut self, keys: &Vec<KeyWrapper>, data: &KVMap) {
+            let mut iter = self.construct.new_iterator();
+            assert!(!iter.valid());
+            iter.seek_to_first();
+            println!("Forward scan data size {}", data.len());
+            for (k, v) in data {
+                println!("forward {:?} value: {:?}", k.key.as_slice(), v);
+                assert_eq!(iter.key(), k.key.as_slice());
+                assert_eq!(iter.value(), v.as_slice());
+                iter.next();
+            }
+
+            assert!(!iter.valid());
+        }
+
+        pub fn test_backward_scan(&mut self, keys: &Vec<KeyWrapper>, data: &KVMap) {
+            let mut iter = self.construct.new_iterator();
+            assert!(!iter.valid());
+            iter.seek_to_last();
+            for (k, v) in data.iter().rev() {
+                assert_eq!(iter.key(), k.key.as_slice());
+                assert_eq!(iter.value(), v.as_slice());
+                iter.prev();
+            }
+            assert!(!iter.valid());
+        }
+
+        pub fn test_random_access(&mut self) {
+            todo!("Test random access")
+        }
+    }
+
+    #[test]
+    fn test_empty() {
+        for i in 0..kNumTestArgs {
+            if kTestArgList[i].r#type != TestType::BLOCK {
+                continue;
+            }
+            let mut test = TestTemplate::new(&kTestArgList[i]);
+            println!("Test empty: {:?}", i);
+            test.test();
+        }
+    }
+    #[test]
+    // Special test for a block with no restart entries.  The C++ leveldb
+    // code never generates such blocks, but the Java version of leveldb
+    // seems to.
+    fn test_zero_restart_points_in_block() {
+        let contents = BlockContent::new(vec![0, 0, 0, 0], false, false);
+        let mut block = Block::new(contents);
+        let mut iter = block.new_iterator_into(Arc::new(Box::new(BytewiseComparatorImpl)));
+        iter.seek_to_first();
+        assert!(!iter.valid());
+        iter.seek_to_first();
+        assert!(!iter.valid());
+        iter.seek(b"foo");
+        assert!(!iter.valid());
+    }
+
+    #[test]
+    fn test_simple_empty_key() {
+        for i in 0..kNumTestArgs {
+            if kTestArgList[i].r#type != TestType::BLOCK {
+                continue;
+            }
+            let mut test = TestTemplate::new(&kTestArgList[i]);
+            println!("Test simple empty key: {:?}", i);
+            let key = KeyWrapper {
+                key: Vec::new(),
+                cmp: test.options.comparator.clone(),
+            };
+            test.add(key, b"v");
+            test.test();
+        }
+    }
+
+    #[test]
+    fn test_simple_single() {
+        for i in 0..kNumTestArgs {
+            if kTestArgList[i].r#type != TestType::BLOCK {
+                continue;
+            }
+            let mut test = TestTemplate::new(&kTestArgList[i]);
+            println!("Test simple single: {:?}", i);
+            let key = KeyWrapper {
+                key: b"abc".to_vec(),
+                cmp: test.options.comparator.clone(),
+            };
+            test.add(key, b"v");
+            test.test();
+        }
+    }
+
+    #[test]
+    fn test_simple_multi() {
+        for i in 0..kNumTestArgs {
+            if kTestArgList[i].r#type != TestType::BLOCK {
+                continue;
+            }
+            let mut test = TestTemplate::new(&kTestArgList[i]);
+            println!("Test simple multi: {:?}", i);
+            let key1 = KeyWrapper {
+                key: b"abc".to_vec(),
+                cmp: test.options.comparator.clone(),
+            };
+            test.add(key1, b"v");
+            let key2 = KeyWrapper {
+                key: b"abcd".to_vec(),
+                cmp: test.options.comparator.clone(),
+            };
+            test.add(key2, b"v");
+            let key3 = KeyWrapper {
+                key: b"ac".to_vec(),
+                cmp: test.options.comparator.clone(),
+            };
+            test.add(key3, b"v2");
+            test.test();
+        }
+    }
+
+    #[test]
+    fn test_simple_special_key() {
+        for i in 0..kNumTestArgs {
+            if kTestArgList[i].r#type != TestType::BLOCK {
+                continue;
+            }
+            let mut test = TestTemplate::new(&kTestArgList[i]);
+            println!("Test simple special key: {:?}", i);
+            let key1 = KeyWrapper {
+                key: b"\xff\xff".to_vec(),
+                cmp: test.options.comparator.clone(),
+            };
+            test.add(key1, b"v3");
+            test.test();
+        }
+    }
+
+    // this test is too slow, so we skip it
+    #[test]
+    #[cfg(feature = "slow_tests")]
+    fn test_randomized() {
+        for i in 0..kNumTestArgs {
+            if kTestArgList[i].r#type != TestType::BLOCK {
+                continue;
+            }
+            let mut test = TestTemplate::new(&kTestArgList[i]);
+            println!("Test randomized: {:?}", i);
+            let mut num_entries = 0;
+            let mut rng = thread_rng();
+            while num_entries < 2000 {
+                if (num_entries % 10) == 0 {
+                    println!(
+                        "case {} of {kNumTestArgs}: num_entries = {num_entries}",
+                        i + 1
+                    )
+                }
+
+                for e in 0..num_entries {
+                    let len = skewed(&mut rng, 4);
+                    let key = KeyWrapper {
+                        key: random_key(&mut rng, len as i32),
+                        cmp: test.options.comparator.clone(),
+                    };
+                    let len2 = skewed(&mut rng, 5);
+                    let value = random_string(&mut rng, len2 as i32);
+                    test.add(key, value.as_bytes());
+                }
+
+                if num_entries < 50 {
+                    num_entries += 1;
+                } else {
+                    num_entries += 200;
+                }
+                test.test();
+            }
+        }
+    }
+}
