@@ -43,7 +43,7 @@ impl BlockBuilder {
             println!("finish restarts: {:?}", r);
             self.buffer.put_slice(put_fixed32(*r).as_slice());
         }
-        println!("finish restarts: {:?}", self.restarts.len());
+        println!("finish restarts len: {:?}", self.restarts.len());
         self.buffer
             .put_slice(put_fixed32(self.restarts.len() as u32).as_slice());
         self.finish = true;

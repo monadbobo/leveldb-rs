@@ -7,11 +7,10 @@ use crate::util::options::{CompressionType, Options};
 use bytes::{Bytes, BytesMut};
 use crc32fast::Hasher;
 use std::cmp::Ordering;
-use std::fs::File;
 use std::io::{Read, Write};
 use zstd::zstd_safe::WriteBuf;
 
-const K_BLOCK_TRAILER_SIZE: usize = 7;
+const K_BLOCK_TRAILER_SIZE: usize = 5;
 const MASK_DELTA: u32 = 0xa282ead8;
 
 /// Mask the CRC value to prevent issues with CRCs embedded in the data
@@ -40,10 +39,10 @@ fn create_block_trailer(block_contents: &[u8], block_type: u8) -> [u8; 5] {
     trailer
 }
 
-pub struct TableBuilder {
+pub struct TableBuilder<'a, T: Write> {
     options: Options,
     index_block_options: Options,
-    file: File,
+    file: &'a mut T,
     offset: u64,
     data_block: BlockBuilder,
     index_block: BlockBuilder,
@@ -56,8 +55,8 @@ pub struct TableBuilder {
     status: Result<(), DbError>,
 }
 
-impl TableBuilder {
-    pub fn new(options: Options, file: File) -> Self {
+impl<'a, T: Write> TableBuilder<'a, T> {
+    pub fn new(options: Options, file: &'a mut T) -> Self {
         let mut index_block_options = options.clone();
         let data_block = BlockBuilder::new(options.clone());
         let index_block = BlockBuilder::new(index_block_options.clone());
@@ -104,6 +103,9 @@ impl TableBuilder {
         if self.status.is_err() {
             return;
         }
+
+        println!("table add key: {:?}", key);
+        println!("table add value: {:?}", value);
 
         if self.num_entries > 0 {
             assert_eq!(
@@ -152,8 +154,10 @@ impl TableBuilder {
         if self.data_block.empty() {
             return;
         }
-
+        assert!(!self.pending_index_entry);
+        println!("flush data block");
         let raw = self.data_block.finish();
+        println!("flush data block raw: {:?}", raw);
         self.pending_handle = self.write_block(raw);
         self.data_block.reset();
         //self.pending_handle = self.write_data_block();
@@ -165,8 +169,6 @@ impl TableBuilder {
         if let Some(filter) = &mut self.filter_block {
             filter.start_block(self.offset);
         }
-
-        assert!(!self.pending_index_entry);
     }
 
     pub fn write_block(&mut self, raw: Bytes) -> BlockHandle {
@@ -180,12 +182,17 @@ impl TableBuilder {
         let use_compression = match t {
             CompressionType::NoCompression => false,
             CompressionType::SnappyCompression => {
-                match snap::write::FrameEncoder::new(&mut compressed_output)
-                    .write_all(raw.as_slice())
-                {
+                println!("write block snappy");
+                let mut encoder = snap::write::FrameEncoder::new(&mut compressed_output);
+                match encoder.write_all(raw.as_slice()) {
                     Ok(_) => {
-                        t = CompressionType::SnappyCompression;
-                        true
+                        if encoder.flush().is_err() {
+                            t = NoCompression;
+                            false
+                        } else {
+                            t = CompressionType::SnappyCompression;
+                            true
+                        }
                     }
                     Err(_) => {
                         t = NoCompression;
@@ -212,8 +219,11 @@ impl TableBuilder {
         };
 
         let handle = if use_compression && compressed_output.len() < raw.len() - (raw.len() / 8) {
+            println!("write block snappy {:?}", compressed_output);
             self.write_raw_block(compressed_output.as_slice(), t)
         } else {
+            t = NoCompression;
+            println!("write block snappy raw {:?}", t);
             self.write_raw_block(raw.as_slice(), t)
         };
         //block.reset();
@@ -279,6 +289,7 @@ impl TableBuilder {
                     self.last_key = s;
                 }
                 let handle_encoding = self.pending_handle.encode_to();
+                println!("last_key: {:?}", self.last_key);
                 self.index_block
                     .add(self.last_key.as_slice(), handle_encoding.as_slice());
                 self.pending_index_entry = false;
@@ -294,6 +305,8 @@ impl TableBuilder {
             footer.set_index_handle(index_block_handle);
             footer.set_metaindex_handle(metaindex_block_handle);
             let footer_encoding = footer.encode_to();
+            println!("footer_encoding: {:?}", footer_encoding);
+            println!("footer_encoding footer: {:?}", footer);
             self.status = self
                 .file
                 .write_all(footer_encoding.as_slice())
@@ -304,5 +317,13 @@ impl TableBuilder {
         }
 
         &self.status
+    }
+
+    pub fn status(&self) -> &Result<(), DbError> {
+        &self.status
+    }
+
+    pub fn file_size(&self) -> u64 {
+        self.offset
     }
 }

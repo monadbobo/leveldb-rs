@@ -1,4 +1,4 @@
-use crate::db::iterator::{DBIterator, EmptyDBIterator};
+use crate::db::iterator::{new_error_iterator, DBIterator, EmptyDBIterator};
 use crate::table::format::BlockContent;
 use crate::util::coding::{decode_fixed32, get_varint32};
 use crate::util::comparator::Comparator;
@@ -61,6 +61,7 @@ impl Block {
             owned: block_content.heap_allocated,
         };
 
+        println!("size: {}", b.size);
         if b.size < 4 {
             b.size = 0;
         } else {
@@ -86,12 +87,14 @@ impl Block {
         comparator: Arc<Box<dyn Comparator>>,
     ) -> Box<dyn DBIterator> {
         if self.size < 4 {
-            todo!("error iterator");
+            return new_error_iterator(Err(crate::db::error::DbError::Corruption(
+                "bad block contents".to_string(),
+            )));
         }
 
         let num_restarts = self.num_restarts();
         if num_restarts == 0 {
-            Box::new(EmptyDBIterator::new())
+            Box::new(EmptyDBIterator::new(Ok(())))
         } else {
             let owned_value = Box::new(self.data);
 
@@ -106,10 +109,10 @@ impl Block {
             let iter = BlockIter {
                 comparator,
                 data,
-                restarts: 0,
-                num_restarts: 0,
-                current: 0,
-                restart_index: 0,
+                restarts: self.restart_offset,
+                num_restarts,
+                current: self.restart_offset,
+                restart_index: num_restarts,
                 next_entry_offset: 0,
                 key: Vec::new(),
                 value: &[],
@@ -123,8 +126,12 @@ impl Block {
     }
 
     pub fn new_iterator(&self, comparator: Arc<Box<dyn Comparator>>) -> Box<dyn DBIterator + '_> {
+        println!("new_iterator");
         if self.size < 4 {
-            todo!("error iterator");
+            println!("bad block contents");
+            return new_error_iterator(Err(crate::db::error::DbError::Corruption(
+                "bad block contents".to_string(),
+            )));
         }
 
         println!(
@@ -134,7 +141,8 @@ impl Block {
         );
         let num_restarts = self.num_restarts();
         if num_restarts == 0 {
-            Box::new(EmptyDBIterator::new())
+            println!("EmptyDBIterator");
+            Box::new(EmptyDBIterator::new(Ok(())))
         } else {
             Box::new(BlockIter {
                 comparator,
@@ -321,8 +329,10 @@ impl DBIterator for BlockIter<'_> {
     }
 
     fn seek_to_first(&mut self) {
+        println!("seek_to_first");
         self.seek_to_restart_point(0);
         self.parse_next_key();
+        println!("seek_to_first valid: {}", self.valid());
     }
 
     fn seek_to_last(&mut self) {
@@ -411,6 +421,7 @@ impl DBIterator for BlockIter<'_> {
     }
 
     fn status(&self) -> Result<(), crate::db::error::DbError> {
-        todo!()
+        //        &self.status
+        Ok(())
     }
 }

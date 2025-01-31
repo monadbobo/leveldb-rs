@@ -17,8 +17,8 @@ pub struct EmptyDBIterator {
 }
 
 impl EmptyDBIterator {
-    pub fn new() -> Self {
-        Self { status: Ok(()) }
+    pub fn new(status: Result<(), DbError>) -> Self {
+        Self { status }
     }
 }
 
@@ -48,4 +48,8 @@ impl DBIterator for EmptyDBIterator {
     fn status(&self) -> Result<(), DbError> {
         todo!()
     }
+}
+
+pub fn new_error_iterator(status: Result<(), DbError>) -> Box<dyn DBIterator> {
+    Box::new(EmptyDBIterator::new(status))
 }

@@ -4,10 +4,11 @@ use crate::db::options::ReadOptions;
 use crate::table::block::Block;
 use crate::table::filter_block::FilterBlockReader;
 use crate::table::format::{kEncodedLength, read_block, BlockHandle, Footer};
-use crate::table::two_level_iterator::BlockFunction;
+use crate::table::two_level_iterator::{new_two_level_iterator, BlockFunction};
 use crate::util::coding::encode_fixed64;
 use crate::util::comparator::{BytewiseComparatorImpl, Comparator};
 use crate::util::options::Options;
+use std::io::{Read, Seek};
 use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 
@@ -15,10 +16,10 @@ pub trait HanldeTableData {
     fn handle(&mut self, key: &[u8], value: &[u8]) -> Result<(), DbError>;
 }
 
-pub struct Table<'a> {
+pub struct Table<'a, T: FileExt> {
     options: Options,
     status: Result<(), DbError>,
-    file: std::fs::File,
+    file: T,
     cache_id: u64,
     filter: Option<FilterBlockReader<'a>>,
     filter_data: Option<Vec<u8>>,
@@ -26,8 +27,8 @@ pub struct Table<'a> {
     index_block: Block,
 }
 
-impl<'a> Table<'a> {
-    pub fn new(options: &Options, file: std::fs::File, size: u64) -> Result<Table, DbError> {
+impl<'a, T: FileExt> Table<'a, T> {
+    pub fn new(options: Options, mut file: T, size: u64) -> Result<Table<'a, T>, DbError> {
         if size < kEncodedLength as u64 {
             return Err(DbError::Corruption(
                 "file is too short to be an sstable".to_string(),
@@ -36,14 +37,20 @@ impl<'a> Table<'a> {
 
         let mut buf = [0u8; kEncodedLength];
         file.read_at(&mut buf, size - kEncodedLength as u64)?;
+        println!("Footer Buf: {:?}", buf);
         let mut footer = Footer::new();
         footer.decode_from(&buf)?;
+        println!("Footer: {:?}", footer);
 
         let mut opt = ReadOptions::default();
         if options.paranoid_checks {
             opt.verify_checksums = true;
         }
-        let index_block_contents = read_block(&file, &opt, &footer.index_handle)?;
+        let index_block_contents = read_block(&mut file, &opt, &footer.index_handle)?;
+        println!(
+            "Index block contents: {:?}",
+            index_block_contents.data.len()
+        );
 
         let index_block = Block::new(index_block_contents);
         let cache_id = if let Some(cache) = &options.block_cache {
@@ -51,8 +58,10 @@ impl<'a> Table<'a> {
         } else {
             0
         };
+
+        println!("index_block {:?}", index_block);
         let table = Table {
-            options: options.clone(),
+            options,
             status: Ok(()),
             file,
             cache_id,
@@ -62,6 +71,13 @@ impl<'a> Table<'a> {
             index_block,
         };
         Ok(table)
+    }
+
+    pub fn new_iterator<'b>(&'b self, options: ReadOptions) -> Box<dyn DBIterator + 'b> {
+        let iter = self
+            .index_block
+            .new_iterator(self.options.comparator.clone());
+        new_two_level_iterator(iter, self, options)
     }
 
     pub fn read_meta(&'a mut self, footer: &Footer) {
@@ -139,7 +155,7 @@ impl<'a> Table<'a> {
             }
 
             if !not_found {
-                let mut block_iter = self.new_iterator(options, iiter.value())?;
+                let mut block_iter = self.block_iterator(options, iiter.value())?;
                 block_iter.seek(k);
                 if block_iter.valid() {
                     handle.handle(block_iter.key(), block_iter.value())?;
@@ -170,8 +186,8 @@ impl<'a> Table<'a> {
     }
 }
 
-impl BlockFunction for Table<'_> {
-    fn new_iterator(
+impl<T: FileExt> BlockFunction for Table<'_, T> {
+    fn block_iterator(
         &self,
         options: &ReadOptions,
         index_value: &[u8],
@@ -204,9 +220,13 @@ impl BlockFunction for Table<'_> {
 mod tests {
     use crate::db::error::DbError;
     use crate::db::iterator::DBIterator;
+    use crate::db::options::ReadOptions;
     use crate::table::block::Block;
     use crate::table::block_builder::BlockBuilder;
     use crate::table::format::BlockContent;
+    use crate::table::table::Table;
+    use crate::table::table_builder::TableBuilder;
+    use crate::table::two_level_iterator::BlockFunction;
     use crate::util::comparator::{BytewiseComparatorImpl, Comparator};
     use crate::util::options::Options;
     use crate::util::testutil::{random_key, random_string, skewed};
@@ -215,7 +235,11 @@ mod tests {
     use rand::{thread_rng, SeedableRng};
     use std::any::Any;
     use std::cmp::Ordering;
+    use std::fs::File;
+    use std::io::Write;
+    use std::os::unix::fs::FileExt;
     use std::sync::Arc;
+    use tracing_subscriber::registry::Data;
     use zstd::zstd_safe::WriteBuf;
 
     struct ReverseKeyComparator;
@@ -270,6 +294,41 @@ mod tests {
             rev.reverse();
             rev.put_u8(b'\0');
             rev
+        }
+    }
+
+    #[derive(Clone)]
+    struct StringSource {
+        content: Vec<u8>,
+    }
+
+    impl FileExt for StringSource {
+        fn read_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+            let mut len = buf.len();
+            if offset + len as u64 > self.content.len() as u64 {
+                len = (self.content.len() as u64 - offset) as usize;
+            }
+            buf.copy_from_slice(&self.content[offset as usize..offset as usize + len]);
+            Ok(len)
+        }
+
+        fn write_at(&self, buf: &[u8], offset: u64) -> std::io::Result<usize> {
+            todo!()
+        }
+    }
+
+    struct StringSink {
+        content: Vec<u8>,
+    }
+
+    impl Write for StringSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.content.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
 
@@ -379,6 +438,82 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .new_iterator(self.comparator.clone())
+        }
+
+        fn data(&self) -> &KVMap {
+            &self.data
+        }
+    }
+
+    struct TableConstructor {
+        comparator: Arc<Box<dyn Comparator>>,
+        table: Option<Table<'static, StringSource>>,
+        source: StringSource,
+        data: KVMap,
+    }
+
+    impl TableConstructor {
+        pub fn new(cmp: Arc<Box<dyn Comparator>>) -> Self {
+            TableConstructor {
+                comparator: cmp,
+                table: None,
+                data: KVMap::new(),
+                source: StringSource {
+                    content: Vec::new(),
+                },
+            }
+        }
+    }
+
+    impl Constructor for TableConstructor {
+        fn add(&mut self, key: KeyWrapper, value: &[u8]) {
+            println!("Add key: {:?}", key.key);
+            println!("Add value: {:?}", value.to_vec());
+            self.data.insert(key, value.to_vec());
+        }
+
+        fn finish_impl(&mut self, options: &Options, data: &KVMap) -> Result<(), DbError> {
+            self.table = None;
+            self.source.content.clear();
+
+            let mut sink = StringSink {
+                content: Vec::new(),
+            };
+
+            let file_size = {
+                let mut table_builder = TableBuilder::new(options.clone(), &mut sink);
+
+                for (key, value) in data {
+                    table_builder.add(key.key.as_slice(), value.as_slice());
+                    assert!(table_builder.status().is_ok());
+                }
+
+                assert!(table_builder.finish().is_ok());
+                table_builder.file_size()
+            };
+
+            let len = sink.content.len();
+            assert_eq!(len, file_size as usize);
+
+            self.source = StringSource {
+                content: sink.content,
+            };
+
+            let table_options = Options {
+                comparator: self.comparator.clone(),
+                ..options.clone()
+            };
+
+            Table::new(table_options, self.source.clone(), len as u64).map(|table| {
+                self.table = Some(table);
+            })
+        }
+
+        fn new_iterator(&self) -> Box<dyn DBIterator + '_> {
+            self.table
+                .as_ref()
+                .unwrap()
+                .new_iterator(ReadOptions::default())
         }
 
         fn data(&self) -> &KVMap {
@@ -502,7 +637,11 @@ mod tests {
 
             match args.r#type {
                 TestType::TABLE => {
-                    todo!("Table")
+                    let cmp = options.comparator.clone();
+                    TestTemplate {
+                        options,
+                        construct: Box::new(TableConstructor::new(cmp)),
+                    }
                 }
                 TestType::BLOCK => {
                     let cmp = options.comparator.clone();
@@ -540,6 +679,7 @@ mod tests {
             iter.seek_to_first();
             println!("Forward scan data size {}", data.len());
             for (k, v) in data {
+                assert!(iter.valid());
                 println!("forward {:?} value: {:?}", k.key.as_slice(), v);
                 assert_eq!(iter.key(), k.key.as_slice());
                 assert_eq!(iter.value(), v.as_slice());
@@ -569,7 +709,9 @@ mod tests {
     #[test]
     fn test_empty() {
         for i in 0..kNumTestArgs {
-            if kTestArgList[i].r#type != TestType::BLOCK {
+            if kTestArgList[i].r#type != TestType::BLOCK
+                && kTestArgList[i].r#type != TestType::TABLE
+            {
                 continue;
             }
             let mut test = TestTemplate::new(&kTestArgList[i]);
@@ -596,7 +738,9 @@ mod tests {
     #[test]
     fn test_simple_empty_key() {
         for i in 0..kNumTestArgs {
-            if kTestArgList[i].r#type != TestType::BLOCK {
+            if kTestArgList[i].r#type != TestType::BLOCK
+                && kTestArgList[i].r#type != TestType::TABLE
+            {
                 continue;
             }
             let mut test = TestTemplate::new(&kTestArgList[i]);
@@ -613,7 +757,9 @@ mod tests {
     #[test]
     fn test_simple_single() {
         for i in 0..kNumTestArgs {
-            if kTestArgList[i].r#type != TestType::BLOCK {
+            if kTestArgList[i].r#type != TestType::BLOCK
+                && kTestArgList[i].r#type != TestType::TABLE
+            {
                 continue;
             }
             let mut test = TestTemplate::new(&kTestArgList[i]);
@@ -630,7 +776,9 @@ mod tests {
     #[test]
     fn test_simple_multi() {
         for i in 0..kNumTestArgs {
-            if kTestArgList[i].r#type != TestType::BLOCK {
+            if kTestArgList[i].r#type != TestType::BLOCK
+                && kTestArgList[i].r#type != TestType::TABLE
+            {
                 continue;
             }
             let mut test = TestTemplate::new(&kTestArgList[i]);
@@ -657,7 +805,9 @@ mod tests {
     #[test]
     fn test_simple_special_key() {
         for i in 0..kNumTestArgs {
-            if kTestArgList[i].r#type != TestType::BLOCK {
+            if kTestArgList[i].r#type != TestType::BLOCK
+                && kTestArgList[i].r#type != TestType::TABLE
+            {
                 continue;
             }
             let mut test = TestTemplate::new(&kTestArgList[i]);
