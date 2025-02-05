@@ -28,3 +28,17 @@ pub(crate) fn skewed(rng: &mut ThreadRng, max_log: u32) -> u32 {
     let base = rng.gen_range(0..=max_log);
     rng.gen_range(0..1u32.wrapping_shl(base))
 }
+
+pub(crate) fn compressible_string(rng: &mut ThreadRng, len: i32, compressibility: f64) -> String {
+    let mut raw = (len as f64 * compressibility) as i32;
+    if raw < 1 {
+        raw = 1;
+    }
+    let raw_data = random_string(rng, raw);
+    let mut result = String::with_capacity(len as usize);
+    while result.len() < len as usize {
+        result.push_str(&raw_data);
+    }
+    result.truncate(len as usize);
+    result
+}

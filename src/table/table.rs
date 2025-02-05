@@ -228,8 +228,8 @@ mod tests {
     use crate::table::table_builder::TableBuilder;
     use crate::table::two_level_iterator::BlockFunction;
     use crate::util::comparator::{BytewiseComparatorImpl, Comparator};
-    use crate::util::options::Options;
-    use crate::util::testutil::{random_key, random_string, skewed};
+    use crate::util::options::{CompressionType, Options};
+    use crate::util::testutil::{compressible_string, random_key, random_string, skewed};
     use bytes::{BufMut, Bytes};
     use rand::rngs::StdRng;
     use rand::{thread_rng, SeedableRng};
@@ -462,6 +462,10 @@ mod tests {
                     content: Vec::new(),
                 },
             }
+        }
+
+        pub fn approximate_offset_of_plain(&self, key: &[u8]) -> u64 {
+            self.table.as_ref().unwrap().approximate_offset_of(key)
         }
     }
 
@@ -823,7 +827,6 @@ mod tests {
 
     // this test is too slow, so we skip it
     #[test]
-    #[cfg(feature = "slow_tests")]
     fn test_randomized() {
         for i in 0..kNumTestArgs {
             if kTestArgList[i].r#type != TestType::BLOCK {
@@ -859,6 +862,170 @@ mod tests {
                 }
                 test.test();
             }
+        }
+    }
+
+    fn between(val: u64, low: u64, high: u64) -> bool {
+        let result = (val >= low) && (val <= high);
+        if !result {
+            println!("Value {} is not in range [{}, {}]", val, low, high);
+        }
+        result
+    }
+
+    #[test]
+    fn test_table_approximate_offset_of_plain() {
+        let mut c = TableConstructor::new(Arc::new(Box::new(BytewiseComparatorImpl)));
+        c.add(
+            KeyWrapper {
+                key: b"k01".to_vec(),
+                cmp: Arc::new(Box::new(BytewiseComparatorImpl)),
+            },
+            b"hello",
+        );
+        c.add(
+            KeyWrapper {
+                key: b"k02".to_vec(),
+                cmp: Arc::new(Box::new(BytewiseComparatorImpl)),
+            },
+            b"hello2",
+        );
+        c.add(
+            KeyWrapper {
+                key: b"k03".to_vec(),
+                cmp: Arc::new(Box::new(BytewiseComparatorImpl)),
+            },
+            vec!['x' as u8; 10000].as_slice(),
+        );
+        c.add(
+            KeyWrapper {
+                key: b"k04".to_vec(),
+                cmp: Arc::new(Box::new(BytewiseComparatorImpl)),
+            },
+            vec!['x' as u8; 200000].as_slice(),
+        );
+        c.add(
+            KeyWrapper {
+                key: b"k05".to_vec(),
+                cmp: Arc::new(Box::new(BytewiseComparatorImpl)),
+            },
+            vec!['x' as u8; 300000].as_slice(),
+        );
+        c.add(
+            KeyWrapper {
+                key: b"k06".to_vec(),
+                cmp: Arc::new(Box::new(BytewiseComparatorImpl)),
+            },
+            b"hello3",
+        );
+        c.add(
+            KeyWrapper {
+                key: b"k07".to_vec(),
+                cmp: Arc::new(Box::new(BytewiseComparatorImpl)),
+            },
+            vec!['x' as u8; 100000].as_slice(),
+        );
+
+        let mut options = Options::default();
+        options.block_size = 1024;
+        options.compression = crate::util::options::CompressionType::NoCompression;
+
+        let mut keys = Vec::new();
+        let mut kvmap = KVMap::new();
+        c.finish(&options, &mut keys, &mut kvmap).unwrap();
+
+        assert!(between(c.approximate_offset_of_plain(b"k01"), 0, 0));
+    }
+
+    fn compress_support(t: &CompressionType) -> bool {
+        let in_data = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut out = Vec::new();
+        match t {
+            CompressionType::SnappyCompression => {
+                if let Ok(_) = snap::raw::Encoder::new().compress_vec(in_data.as_bytes()) {
+                    true
+                } else {
+                    false
+                }
+            }
+            CompressionType::ZstdCompression => {
+                if let Ok(_) = zstd::stream::copy_encode(in_data.as_bytes(), &mut out, 1) {
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    // rewrite this cpp to rust:   Random rnd(301);
+    #[test]
+    fn test_table_approximate_offset_of_compressed() {
+        let mut c = TableConstructor::new(Arc::new(Box::new(BytewiseComparatorImpl)));
+        let mut rnd = thread_rng();
+        c.add(
+            KeyWrapper {
+                key: b"k01".to_vec(),
+                cmp: Arc::new(Box::new(BytewiseComparatorImpl)),
+            },
+            b"hello",
+        );
+        c.add(
+            KeyWrapper {
+                key: b"k02".to_vec(),
+                cmp: Arc::new(Box::new(BytewiseComparatorImpl)),
+            },
+            compressible_string(&mut rnd, 10000, 0.25).as_bytes(),
+        );
+        c.add(
+            KeyWrapper {
+                key: b"k03".to_vec(),
+                cmp: Arc::new(Box::new(BytewiseComparatorImpl)),
+            },
+            b"hello3",
+        );
+        c.add(
+            KeyWrapper {
+                key: b"k04".to_vec(),
+                cmp: Arc::new(Box::new(BytewiseComparatorImpl)),
+            },
+            compressible_string(&mut rnd, 10000, 0.25).as_bytes(),
+        );
+
+        let mut compression_types = vec![
+            CompressionType::SnappyCompression,
+            CompressionType::ZstdCompression,
+        ];
+
+        for t in compression_types {
+            if !compress_support(&t) {
+                continue;
+            }
+
+            let mut options = Options::default();
+            options.block_size = 1024;
+            options.compression = t;
+
+            let mut keys = Vec::new();
+            let mut kvmap = KVMap::new();
+            c.finish(&options, &mut keys, &mut kvmap).unwrap();
+
+            let expected = 2500;
+            let kSlop = 1000;
+            let min_z = expected - kSlop;
+            let max_z = expected + kSlop;
+
+            assert!(between(c.approximate_offset_of_plain(b"abc"), 0, kSlop));
+            assert!(between(c.approximate_offset_of_plain(b"k01"), 0, kSlop));
+            assert!(between(c.approximate_offset_of_plain(b"k02"), 0, kSlop));
+            assert!(between(c.approximate_offset_of_plain(b"k03"), min_z, max_z));
+            assert!(between(c.approximate_offset_of_plain(b"k04"), min_z, max_z));
+            assert!(between(
+                c.approximate_offset_of_plain(b"xyz"),
+                2 * min_z,
+                2 * max_z
+            ));
         }
     }
 }
