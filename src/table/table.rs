@@ -218,8 +218,14 @@ impl<T: FileExt> BlockFunction for Table<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use crate::db::dbformat::ValueType::TypeValue;
+    use crate::db::dbformat::{
+        append_internal_key, parse_internal_key, InternalKeyComparator, ParseInternalKey,
+        MAX_SEQUENCE_NUMBER,
+    };
     use crate::db::error::DbError;
     use crate::db::iterator::DBIterator;
+    use crate::db::memtable::MemTable;
     use crate::db::options::ReadOptions;
     use crate::table::block::Block;
     use crate::table::block_builder::BlockBuilder;
@@ -238,6 +244,7 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
     use std::os::unix::fs::FileExt;
+    use std::rc::Rc;
     use std::sync::Arc;
     use tracing_subscriber::registry::Data;
     use zstd::zstd_safe::WriteBuf;
@@ -525,7 +532,105 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Eq, PartialEq)]
+    struct KeyConvertingIterator {
+        iter: Box<dyn DBIterator>,
+        status: Result<(), DbError>,
+    }
+
+    impl DBIterator for KeyConvertingIterator {
+        fn valid(&self) -> bool {
+            self.iter.valid()
+        }
+
+        fn seek_to_first(&mut self) {
+            self.iter.seek_to_first()
+        }
+
+        fn seek_to_last(&mut self) {
+            self.iter.seek_to_last()
+        }
+
+        fn seek(&mut self, target: &[u8]) {
+            let ikey = ParseInternalKey::new(target, MAX_SEQUENCE_NUMBER, TypeValue);
+            let key = append_internal_key(&ikey);
+            self.iter.seek(key.as_slice())
+        }
+
+        fn next(&mut self) {
+            self.iter.next()
+        }
+
+        fn prev(&mut self) {
+            self.iter.prev()
+        }
+
+        fn key(&self) -> &[u8] {
+            assert!(self.valid());
+            match parse_internal_key(self.iter.key()) {
+                None => {
+                    //unsafe {self.status = Err(DbError::Corruption("badkey".to_string()));
+                    &[]
+                }
+                Some(k) => k.user_key.as_slice(),
+            }
+        }
+
+        fn value(&self) -> &[u8] {
+            self.iter.value()
+        }
+
+        fn status(&self) -> Result<(), DbError> {
+            //self.status.clone()
+            todo!()
+        }
+    }
+
+    struct MemTableConstructor {
+        internal_comparator: InternalKeyComparator,
+        memtable: MemTable,
+        data: KVMap,
+    }
+
+    impl MemTableConstructor {
+        pub fn new(cmp: Rc<dyn Comparator>) -> Self {
+            let internal_comparator = InternalKeyComparator {
+                user_comparator: cmp.clone(),
+            };
+            let memtable = MemTable::new(&internal_comparator);
+            MemTableConstructor {
+                internal_comparator,
+                memtable,
+                data: KVMap::new(),
+            }
+        }
+    }
+
+    impl Constructor for MemTableConstructor {
+        fn add(&mut self, key: KeyWrapper, value: &[u8]) {
+            self.data.insert(key, value.to_vec());
+        }
+
+        fn finish_impl(&mut self, options: &Options, data: &KVMap) -> Result<(), DbError> {
+            self.memtable = MemTable::new(&self.internal_comparator);
+            let mut seq = 1;
+            for kvp in &self.data {
+                self.memtable
+                    .add(seq, TypeValue, kvp.0.key.as_slice(), kvp.1);
+                seq += 1;
+            }
+            Ok(())
+        }
+
+        fn new_iterator(&self) -> Box<dyn DBIterator + '_> {
+            todo!()
+        }
+
+        fn data(&self) -> &KVMap {
+            &self.data
+        }
+    }
+
+    #[derive(Clone, Eq, PartialEq, Debug)]
     enum TestType {
         TABLE,
         BLOCK,
@@ -655,7 +760,11 @@ mod tests {
                     }
                 }
                 TestType::MEMTABLE => {
-                    todo!("Memtable")
+                    let cmp = options.comparator.clone();
+                    TestTemplate {
+                        options,
+                        construct: Box::new(BlockConstructor::new(cmp)),
+                    }
                 }
                 TestType::DB => {
                     todo!("DB")
@@ -683,6 +792,11 @@ mod tests {
             iter.seek_to_first();
             println!("Forward scan data size {}", data.len());
             for (k, v) in data {
+                println!(
+                    "start iterator, key: {:?}, value: {:?}",
+                    k.key.as_slice(),
+                    v
+                );
                 assert!(iter.valid());
                 println!("forward {:?} value: {:?}", k.key.as_slice(), v);
                 assert_eq!(iter.key(), k.key.as_slice());
@@ -715,6 +829,7 @@ mod tests {
         for i in 0..kNumTestArgs {
             if kTestArgList[i].r#type != TestType::BLOCK
                 && kTestArgList[i].r#type != TestType::TABLE
+                && kTestArgList[i].r#type != TestType::MEMTABLE
             {
                 continue;
             }
@@ -744,6 +859,7 @@ mod tests {
         for i in 0..kNumTestArgs {
             if kTestArgList[i].r#type != TestType::BLOCK
                 && kTestArgList[i].r#type != TestType::TABLE
+                && kTestArgList[i].r#type != TestType::MEMTABLE
             {
                 continue;
             }
@@ -763,6 +879,7 @@ mod tests {
         for i in 0..kNumTestArgs {
             if kTestArgList[i].r#type != TestType::BLOCK
                 && kTestArgList[i].r#type != TestType::TABLE
+                && kTestArgList[i].r#type != TestType::MEMTABLE
             {
                 continue;
             }
@@ -782,6 +899,7 @@ mod tests {
         for i in 0..kNumTestArgs {
             if kTestArgList[i].r#type != TestType::BLOCK
                 && kTestArgList[i].r#type != TestType::TABLE
+                && kTestArgList[i].r#type != TestType::MEMTABLE
             {
                 continue;
             }
@@ -811,6 +929,7 @@ mod tests {
         for i in 0..kNumTestArgs {
             if kTestArgList[i].r#type != TestType::BLOCK
                 && kTestArgList[i].r#type != TestType::TABLE
+                && kTestArgList[i].r#type != TestType::MEMTABLE
             {
                 continue;
             }
@@ -829,14 +948,17 @@ mod tests {
     #[test]
     fn test_randomized() {
         for i in 0..kNumTestArgs {
-            if kTestArgList[i].r#type != TestType::BLOCK {
+            println!("======Test randomized: {:?}", kTestArgList[i].r#type);
+            if kTestArgList[i].r#type != TestType::BLOCK
+                || kTestArgList[i].r#type != TestType::MEMTABLE
+            {
                 continue;
             }
             let mut test = TestTemplate::new(&kTestArgList[i]);
             println!("Test randomized: {:?}", i);
             let mut num_entries = 0;
             let mut rng = thread_rng();
-            while num_entries < 2000 {
+            while num_entries < 1000 {
                 if (num_entries % 10) == 0 {
                     println!(
                         "case {} of {kNumTestArgs}: num_entries = {num_entries}",

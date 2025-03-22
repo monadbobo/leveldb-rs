@@ -2,8 +2,11 @@ use crate::util::coding::{decode_fixed64, encode_varint32, put_fixed64, put_vari
 use crate::util::comparator::Comparator;
 use std::cmp::Ordering;
 use std::fmt::Display;
+use std::rc::Rc;
 
 pub type SequenceNumber = u64;
+
+pub const MAX_SEQUENCE_NUMBER: SequenceNumber = (0x1_u64 << 56) - 1;
 
 #[inline]
 pub fn extract_user_key(internal_key: &[u8]) -> &[u8] {
@@ -42,7 +45,7 @@ fn pack_sequence_and_type(seq: SequenceNumber, t: u8) -> u64 {
     seq << 8 | t as u64
 }
 
-fn append_internal_key(key: &ParseInternalKey) -> Vec<u8> {
+pub fn append_internal_key(key: &ParseInternalKey) -> Vec<u8> {
     let mut result = Vec::new();
     result.extend_from_slice(key.user_key);
     result.append(&mut put_fixed64(pack_sequence_and_type(
@@ -137,11 +140,12 @@ impl InternalKey {
     }
 }
 
-pub struct InternalKeyComparator<T: Comparator> {
-    user_comparator: T,
+#[derive(Clone)]
+pub struct InternalKeyComparator {
+    pub(crate) user_comparator: Rc<dyn Comparator>,
 }
 
-impl<T: Comparator> Comparator for InternalKeyComparator<T> {
+impl Comparator for InternalKeyComparator {
     fn name(&self) -> &str {
         "leveldb.InternalKeyComparator"
     }
@@ -255,8 +259,9 @@ mod tests {
     }
 
     fn shorten(a: &[u8], b: &[u8]) -> Vec<u8> {
+        let user_comparator = Rc::new(BytewiseComparatorImpl {});
         let c = InternalKeyComparator {
-            user_comparator: BytewiseComparatorImpl,
+            user_comparator: user_comparator as Rc<dyn Comparator>,
         };
         match c.find_shortest_separator(a, b) {
             Some(v) => v,
@@ -265,8 +270,9 @@ mod tests {
     }
 
     fn short_successor(a: &[u8]) -> Vec<u8> {
+        let user_comparator = Rc::new(BytewiseComparatorImpl {});
         let c = InternalKeyComparator {
-            user_comparator: BytewiseComparatorImpl,
+            user_comparator: user_comparator as Rc<dyn Comparator>,
         };
         match c.find_short_successor(a) {
             Some(v) => v,

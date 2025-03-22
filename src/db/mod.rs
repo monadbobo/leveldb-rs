@@ -1,8 +1,10 @@
 mod config;
-mod dbformat;
+pub mod dbformat;
 pub(crate) mod error;
 pub mod iterator;
+pub mod memtable;
 pub mod options;
+mod skiplist;
 mod version_edit;
 mod version_set;
 mod wal;
