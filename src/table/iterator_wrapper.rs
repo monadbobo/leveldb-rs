@@ -27,6 +27,7 @@ impl<'a> IteratorWrapper<'a> {
         if self.iter.is_none() {
             self.valid = false;
         } else {
+            println!("iterator wrapper set");
             self.update();
         }
     }
@@ -58,34 +59,42 @@ impl<'a> IteratorWrapper<'a> {
     }
 
     pub fn next(&mut self) {
+        assert!(self.iter.is_some());
         self.iter.as_mut().unwrap().next();
+        println!("iterator wrapper next");
         self.update();
     }
 
     pub fn prev(&mut self) {
         self.iter.as_mut().unwrap().prev();
+        println!("iterator wrapper prev");
         self.update();
     }
 
     pub fn seek(&mut self, target: &[u8]) {
         self.iter.as_mut().unwrap().seek(target);
+        println!("iterator wrapper seek");
         self.update();
     }
 
     pub fn seek_to_first(&mut self) {
         assert!(self.iter.is_some());
         self.iter.as_mut().unwrap().seek_to_first();
+        println!("iterator wrapper seek_to_first");
         self.update();
     }
 
     pub fn seek_to_last(&mut self) {
+        assert!(self.iter.is_some());
         self.iter.as_mut().unwrap().seek_to_last();
+        println!("iterator wrapper seek_to_last");
         self.update();
     }
 
     fn update(&mut self) {
         assert!(self.iter.is_some());
         if let Some(iter) = self.iter.as_ref() {
+            println!("update iter");
             self.valid = iter.valid();
             if self.valid {
                 let data: &[u8] = unsafe {

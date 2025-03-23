@@ -2,6 +2,7 @@ use crate::db::error::DbError;
 use crate::db::iterator::DBIterator;
 use crate::db::options::ReadOptions;
 use crate::table::iterator_wrapper::IteratorWrapper;
+use std::mem::zeroed;
 
 pub trait BlockFunction {
     fn block_iterator(
@@ -77,37 +78,31 @@ impl<'a, 'b, B: BlockFunction> TwoLevelIterator<'a, 'b, B> {
     }
 
     fn skip_empty_data_blocks_forward(&mut self) {
-        loop {
-            if self.data_iter.iter().is_none() || !self.data_iter.valid() {
-                if !self.index_iter.valid() {
-                    self.set_data_iterator(None);
-                    return;
-                }
-                self.index_iter.next();
-                self.init_data_block();
-                if let Some(iter) = self.data_iter.iter_mut() {
-                    iter.seek_to_first();
-                }
-            } else {
-                break;
+        while self.data_iter.iter().is_none() || !self.data_iter.valid() {
+            if !self.index_iter.valid() {
+                self.set_data_iterator(None);
+                return;
+            }
+            println!("skip_empty_data_blocks_forward index next");
+            self.index_iter.next();
+            println!("skip_empty_data_blocks_forward init_data_block");
+            self.init_data_block();
+            if self.data_iter.iter().is_some() {
+                self.data_iter.seek_to_first();
             }
         }
     }
 
     fn skip_empty_data_blocks_backward(&mut self) {
-        loop {
-            if self.data_iter.iter().is_none() || !self.data_iter.valid() {
-                if !self.index_iter.valid() {
-                    self.set_data_iterator(None);
-                    return;
-                }
-                self.index_iter.prev();
-                self.init_data_block();
-                if let Some(iter) = self.data_iter.iter_mut() {
-                    iter.seek_to_last();
-                }
-            } else {
-                break;
+        while self.data_iter.iter().is_none() || !self.data_iter.valid() {
+            if !self.index_iter.valid() {
+                self.set_data_iterator(None);
+                return;
+            }
+            self.index_iter.prev();
+            self.init_data_block();
+            if self.data_iter.iter().is_some() {
+                self.data_iter.seek_to_last();
             }
         }
     }

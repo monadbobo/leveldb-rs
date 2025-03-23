@@ -255,7 +255,7 @@ impl BlockIter<'_> {
 
     pub fn get_restart_point(&self, index: u32) -> u32 {
         assert!(index < self.num_restarts);
-        decode_fixed32(&self.data[(self.restarts + index * 4) as usize..])
+        decode_fixed32(&self.data[(self.restarts + index * size_of::<u32>() as u32) as usize..])
     }
 
     pub fn seek_to_restart_point(&mut self, index: u32) {
@@ -324,7 +324,10 @@ impl BlockIter<'_> {
 
 impl DBIterator for BlockIter<'_> {
     fn valid(&self) -> bool {
-        println!("current: {}, restarts: {}", self.current, self.restarts);
+        println!(
+            "valid current: {}, restarts: {}",
+            self.current, self.restarts
+        );
         self.current < self.restarts
     }
 

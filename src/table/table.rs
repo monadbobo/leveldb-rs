@@ -949,9 +949,7 @@ mod tests {
     fn test_randomized() {
         for i in 0..kNumTestArgs {
             println!("======Test randomized: {:?}", kTestArgList[i].r#type);
-            if kTestArgList[i].r#type != TestType::BLOCK
-                || kTestArgList[i].r#type != TestType::MEMTABLE
-            {
+            if kTestArgList[i].r#type == TestType::DB {
                 continue;
             }
             let mut test = TestTemplate::new(&kTestArgList[i]);
