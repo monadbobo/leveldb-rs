@@ -200,7 +200,7 @@ impl<T: FileExt> BlockFunction for Table<'_, T> {
             let mut cache_key_buffer = Vec::with_capacity(16);
             cache_key_buffer.append(&mut encode_fixed64(self.cache_id));
             cache_key_buffer.append(&mut encode_fixed64(handle.offset));
-            if let Some(cache_handle) = cache.lookup(cache_key_buffer.as_slice()) {
+            if let Some(cache_handle) = cache.lookup(&cache_key_buffer) {
                 todo!()
             } else {
                 let contents = read_block(&self.file, &options, &handle)?;

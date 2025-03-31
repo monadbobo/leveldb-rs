@@ -14,7 +14,7 @@ pub struct Options {
     pub compression: CompressionType,
     pub zstd_compression_level: i32,
     pub paranoid_checks: bool,
-    pub block_cache: Option<Cache>,
+    pub block_cache: Option<Arc<dyn Cache<Vec<u8>, Vec<u8>>>>,
 }
 
 impl Default for Options {
