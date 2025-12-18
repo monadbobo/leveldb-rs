@@ -16,18 +16,18 @@ pub trait HanldeTableData {
     fn handle(&mut self, key: &[u8], value: &[u8]) -> Result<(), DbError>;
 }
 
-struct Rep<'a> {
+struct Rep<'a, T: FileExt> {
     options: Options,
     cache_id: u64,
     filter: Option<FilterBlockReader<'a>>,
     filter_data: Option<Vec<u8>>,
     metaindex_handle: BlockHandle,
     index_block: Block,
+    file: T,
 }
 
 pub struct Table<'a, T: FileExt> {
-    rep: Rep<'a>,
-    file: T,
+    rep: Rep<'a, T>,
 }
 
 impl<'a, T: FileExt> Table<'a, T> {
@@ -70,8 +70,9 @@ impl<'a, T: FileExt> Table<'a, T> {
             filter_data: None,
             metaindex_handle: footer.metaindex_handle,
             index_block,
+            file,
         };
-        let table = Table { rep, file };
+        let table = Table { rep };
         Ok(table)
     }
 
@@ -93,7 +94,7 @@ impl<'a, T: FileExt> Table<'a, T> {
             opt.verify_checksums = true;
         }
 
-        if let Ok(contents) = read_block(&self.file, &opt, &footer.metaindex_handle) {
+        if let Ok(contents) = read_block(&self.rep.file, &opt, &footer.metaindex_handle) {
             let meta = Block::new(contents);
             let bytes_comparator: Arc<Box<dyn Comparator>> =
                 Arc::new(Box::new(BytewiseComparatorImpl));
@@ -127,7 +128,7 @@ impl<'a, T: FileExt> Table<'a, T> {
             opt.verify_checksums = true;
         }
 
-        if let Ok(block) = read_block(&self.file, &opt, &filter_handle) {
+        if let Ok(block) = read_block(&self.rep.file, &opt, &filter_handle) {
             self.rep.filter_data = Some(block.data);
             self.rep.filter = Some(FilterBlockReader::new(
                 self.rep.options.filter_policy.as_ref().unwrap().clone(),
@@ -209,12 +210,12 @@ impl<T: FileExt> BlockFunction for Table<'_, T> {
             if let Some(cache_handle) = cache.lookup(&cache_key_buffer) {
                 todo!()
             } else {
-                let contents = read_block(&self.file, &options, &handle)?;
+                let contents = read_block(&self.rep.file, &options, &handle)?;
 
                 Block::new(contents)
             }
         } else {
-            let contents = read_block(&self.file, &options, &handle)?;
+            let contents = read_block(&self.rep.file, &options, &handle)?;
             Block::new(contents)
         };
 
@@ -238,21 +239,17 @@ mod tests {
     use crate::table::format::BlockContent;
     use crate::table::table::Table;
     use crate::table::table_builder::TableBuilder;
-    use crate::table::two_level_iterator::BlockFunction;
     use crate::util::comparator::{BytewiseComparatorImpl, Comparator};
     use crate::util::options::{CompressionType, Options};
     use crate::util::testutil::{compressible_string, random_key, random_string, skewed};
     use bytes::{BufMut, Bytes};
-    use rand::rngs::StdRng;
-    use rand::{thread_rng, SeedableRng};
+    use rand::thread_rng;
     use std::any::Any;
     use std::cmp::Ordering;
-    use std::fs::File;
     use std::io::Write;
     use std::os::unix::fs::FileExt;
     use std::rc::Rc;
     use std::sync::Arc;
-    use tracing_subscriber::registry::Data;
     use zstd::zstd_safe::WriteBuf;
 
     struct ReverseKeyComparator;
