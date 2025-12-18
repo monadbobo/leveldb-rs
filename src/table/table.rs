@@ -16,15 +16,18 @@ pub trait HanldeTableData {
     fn handle(&mut self, key: &[u8], value: &[u8]) -> Result<(), DbError>;
 }
 
-pub struct Table<'a, T: FileExt> {
+struct Rep<'a> {
     options: Options,
-    status: Result<(), DbError>,
-    file: T,
     cache_id: u64,
     filter: Option<FilterBlockReader<'a>>,
     filter_data: Option<Vec<u8>>,
     metaindex_handle: BlockHandle,
     index_block: Block,
+}
+
+pub struct Table<'a, T: FileExt> {
+    rep: Rep<'a>,
+    file: T,
 }
 
 impl<'a, T: FileExt> Table<'a, T> {
@@ -60,33 +63,33 @@ impl<'a, T: FileExt> Table<'a, T> {
         };
 
         println!("index_block {:?}", index_block);
-        let table = Table {
+        let rep = Rep {
             options,
-            status: Ok(()),
-            file,
             cache_id,
             filter: None,
             filter_data: None,
             metaindex_handle: footer.metaindex_handle,
             index_block,
         };
+        let table = Table { rep, file };
         Ok(table)
     }
 
     pub fn new_iterator<'b>(&'b self, options: ReadOptions) -> Box<dyn DBIterator + 'b> {
         let iter = self
+            .rep
             .index_block
-            .new_iterator(self.options.comparator.clone());
+            .new_iterator(self.rep.options.comparator.clone());
         new_two_level_iterator(iter, self, options)
     }
 
     pub fn read_meta(&'a mut self, footer: &Footer) {
-        if self.options.filter_policy.is_none() {
+        if self.rep.options.filter_policy.is_none() {
             return;
         }
 
         let mut opt = ReadOptions::default();
-        if self.options.paranoid_checks {
+        if self.rep.options.paranoid_checks {
             opt.verify_checksums = true;
         }
 
@@ -97,7 +100,8 @@ impl<'a, T: FileExt> Table<'a, T> {
             let mut iter = meta.new_iterator(bytes_comparator);
             let mut key = b"filter.".to_vec();
             key.extend_from_slice(
-                self.options
+                self.rep
+                    .options
                     .filter_policy
                     .as_ref()
                     .unwrap()
@@ -119,15 +123,15 @@ impl<'a, T: FileExt> Table<'a, T> {
         }
 
         let mut opt = ReadOptions::default();
-        if self.options.paranoid_checks {
+        if self.rep.options.paranoid_checks {
             opt.verify_checksums = true;
         }
 
         if let Ok(block) = read_block(&self.file, &opt, &filter_handle) {
-            self.filter_data = Some(block.data);
-            self.filter = Some(FilterBlockReader::new(
-                self.options.filter_policy.as_ref().unwrap().clone(),
-                self.filter_data.as_ref().unwrap(),
+            self.rep.filter_data = Some(block.data);
+            self.rep.filter = Some(FilterBlockReader::new(
+                self.rep.options.filter_policy.as_ref().unwrap().clone(),
+                self.rep.filter_data.as_ref().unwrap(),
             ));
         }
     }
@@ -139,13 +143,14 @@ impl<'a, T: FileExt> Table<'a, T> {
         mut handle: Box<dyn HanldeTableData>,
     ) -> Result<(), DbError> {
         let mut iiter = self
+            .rep
             .index_block
-            .new_iterator(self.options.comparator.clone());
+            .new_iterator(self.rep.options.comparator.clone());
         iiter.seek(k);
         if iiter.valid() {
             let handle_value = iiter.value();
             let mut not_found = false;
-            if let Some(filter) = self.filter.as_ref() {
+            if let Some(filter) = self.rep.filter.as_ref() {
                 let mut handle = BlockHandle::new();
                 if handle.decode_from(handle_value).is_ok()
                     && filter.key_may_match(handle.offset, k)
@@ -168,8 +173,9 @@ impl<'a, T: FileExt> Table<'a, T> {
 
     pub fn approximate_offset_of(&self, key: &[u8]) -> u64 {
         let mut index_iter = self
+            .rep
             .index_block
-            .new_iterator(self.options.comparator.clone());
+            .new_iterator(self.rep.options.comparator.clone());
         index_iter.seek(key);
 
         if index_iter.valid() {
@@ -178,10 +184,10 @@ impl<'a, T: FileExt> Table<'a, T> {
             if handle.decode_from(input).is_ok() {
                 handle.offset
             } else {
-                self.metaindex_handle.offset
+                self.rep.metaindex_handle.offset
             }
         } else {
-            self.metaindex_handle.offset
+            self.rep.metaindex_handle.offset
         }
     }
 }
@@ -192,13 +198,13 @@ impl<T: FileExt> BlockFunction for Table<'_, T> {
         options: &ReadOptions,
         index_value: &[u8],
     ) -> Result<Box<dyn DBIterator>, DbError> {
-        let block_cache = self.options.block_cache.as_ref();
+        let block_cache = self.rep.options.block_cache.as_ref();
 
         let mut handle = BlockHandle::new();
         handle.decode_from(index_value)?;
         let block = if let Some(cache) = block_cache {
             let mut cache_key_buffer = Vec::with_capacity(16);
-            cache_key_buffer.append(&mut encode_fixed64(self.cache_id));
+            cache_key_buffer.append(&mut encode_fixed64(self.rep.cache_id));
             cache_key_buffer.append(&mut encode_fixed64(handle.offset));
             if let Some(cache_handle) = cache.lookup(&cache_key_buffer) {
                 todo!()
